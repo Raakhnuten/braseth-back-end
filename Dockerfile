@@ -1,5 +1,5 @@
 # ---- Build ----
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
 WORKDIR /app
 
 COPY mvnw pom.xml ./
@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.m2 \
     chmod +x mvnw && ./mvnw -B -q package -DskipTests
 
 # ---- Run ----
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 WORKDIR /app
 
 RUN addgroup -S app && adduser -S app -G app
