@@ -1,0 +1,42 @@
+# Profile for running the API against the web app on a developer machine:
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+#
+# Uses its own database (braseth_local) in the same Postgres container, so the
+# team's braseth_ecommerce database is never migrated by this profile. Create
+# it once with:
+#   docker exec braseth_ecommerce-postgres psql -U braseth_ecommerce -c "CREATE DATABASE braseth_local"
+spring:
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5445}/braseth_local
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5445}/braseth_local
+
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    # "local" lets V003 create the dev sign-in accounts and sample data.
+    contexts: local
+
+app:
+  # The Angular dev server; verification and reset e-mails link here.
+  frontend-url: http://localhost:4200
+
+braseth:
+  v1:
+    mail:
+      # Real e-mails through Gmail, using MAIL_USERNAME / MAIL_PASSWORD from the
+      # environment or the git-ignored .env (see LocalMailEnvironment). Set
+      # MAIL_LOG_ONLY=true to write the links to the log instead.
+      log-only: ${MAIL_LOG_ONLY:false}
+
+jwt:
+  # Local-only signing key so the profile runs without JWT_SECRET set.
+  # Tokens signed with it are worthless anywhere else; never reuse it.
+  secret: ${JWT_SECRET:287988517dafbbe0c688701344b7b6025bae17fb32ac463c8ddefda598fbf694}
+
+management:
+  health:
+    mail:
+      # A Gmail hiccup should not mark the local API as down.
+      enabled: false

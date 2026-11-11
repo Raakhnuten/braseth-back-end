@@ -1,0 +1,25 @@
+# Integration tests: the database URLs come from the Testcontainers PostgreSQL
+# (see IntegrationTest); everything else is fixed here.
+spring:
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    # "local" seeds the dev accounts (password Braseth-Dev-2026!) and sample data.
+    contexts: local
+
+jwt:
+  secret: 25a4040810c54141fc1ffb53d8835bf308554eb49036984b2d6af12d68eaae1e
+
+braseth:
+  v1:
+    mail:
+      log-only: true
+
+management:
+  health:
+    mail:
+      enabled: false
+
+logging:
+  level:
+    com.braseth.ecommerce: INFO

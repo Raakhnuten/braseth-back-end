@@ -1,0 +1,239 @@
+databaseChangeLog:
+  # Sample data for trying the web app on a developer machine. Every changeset
+  # here runs ONLY with the Liquibase context "local" (application-local.yaml
+  # and the integration tests), never in any other environment.
+  - changeSet:
+      id: V003-01-local-dev-accounts
+      author: braseth
+      context: local
+      comment: "Sign-in accounts; every password is Braseth-Dev-2026!"
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO users (name, email, phone, password_hash, status, email_verified_at, roles,
+                                 company_name, telegram, preferred_contact_method)
+              SELECT v.name, v.email, v.phone, crypt('Braseth-Dev-2026!', gen_salt('bf', 10)), 'active', NOW(),
+                     ARRAY[v.role], v.company, v.telegram, v.contact
+              FROM (VALUES
+                ('Dev Owner',      'owner@braseth.test',      '+85510900001', 'ROLE_ADMIN',      NULL,          NULL,            'email'),
+                ('Dev Customer',   'customer@braseth.test',   '+85510900005', 'ROLE_CUSTOMER',   'Dev Company', '@dev_customer', 'telegram')
+              ) AS v(name, email, phone, role, company, telegram, contact)
+              WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.email = v.email);
+      rollback:
+        - sql:
+            sql: DELETE FROM users WHERE email LIKE '%@braseth.test';
+
+  - changeSet:
+      id: V003-02-local-sample-catalogue
+      author: braseth
+      context: local
+      comment: >-
+        Placeholder products: names say "Sample", prose is CONFIGURE_ME and no
+        minimum order is set. Photos are the web app's own /assets files, except
+        the cap's, which are in the local MinIO bucket under
+        product-media/products/caps-hats/ (uploaded from the cap photo folder;
+        they are not in this repository).
+      changes:
+        - sql:
+            sql: |
+              -- A sub-category, so filtering by a parent can be seen to include its children.
+              INSERT INTO categories (parent_id, name, slug, description, sort_order)
+              SELECT c.id, 'Sample Long Sleeve', 'sample-long-sleeve', 'CONFIGURE_ME', 90
+              FROM categories c WHERE c.slug = 't-shirts'
+                AND NOT EXISTS (SELECT 1 FROM categories WHERE slug = 'sample-long-sleeve');
+
+              INSERT INTO products (category_id, name, slug, sku, short_description, description, web_text,
+                                    photos, print_methods, print_positions, maximum_print_colors, is_active, featured)
+              SELECT c.id, v.name, v.slug, v.sku, 'CONFIGURE_ME', 'CONFIGURE_ME',
+                     jsonb_build_object('en', jsonb_strip_nulls(jsonb_build_object(
+                         'name', v.name, 'shortDescription', 'CONFIGURE_ME', 'description', 'CONFIGURE_ME',
+                         'material', v.material))),
+                     (SELECT coalesce(jsonb_agg(jsonb_build_object('id', gen_random_uuid(), 'url', u.url, 'alt', '')
+                                                ORDER BY u.n), '[]')
+                      FROM unnest(v.photos) WITH ORDINALITY AS u(url, n)),
+                     v.methods, v.positions, v.colours, v.active, v.featured
+              FROM (VALUES
+                ('t-shirts', 'Sample T-Shirt', 'sample-t-shirt', 'SAMPLE-TS', true, true, '100% Cotton',
+                 ARRAY['/assets/catalogue/tshirt.jpg', '/assets/catalogue/tshirt-colors.jpg'],
+                 ARRAY['silkscreen', 'heat-transfer'], ARRAY['front', 'back', 'left-sleeve'], 4),
+                ('polo-shirts', 'Sample Polo Shirt', 'sample-polo-shirt', 'SAMPLE-PO', true, true, NULL,
+                 ARRAY['/assets/catalogue/polo.jpg', '/assets/catalogue/polo-ps001.jpg'],
+                 ARRAY['embroidery', 'silkscreen'], ARRAY['pocket'], 6),
+                ('hoodies', 'Sample Hoodie', 'sample-hoodie', 'SAMPLE-HO', true, false, NULL,
+                 ARRAY['/assets/catalogue/hoodie-ja007.jpg'],
+                 ARRAY['silkscreen'], ARRAY[]::text[], NULL),
+                ('caps-hats', 'Sample Cap', 'sample-cap', 'SAMPLE-CA', true, false, NULL,
+                 ARRAY[]::text[],
+                 ARRAY['embroidery'], ARRAY['front'], 6),
+                ('sample-long-sleeve', 'Sample Long Sleeve T-Shirt', 'sample-long-sleeve-t-shirt', 'SAMPLE-LS', true, false, NULL,
+                 ARRAY['/assets/catalogue/tshirt-longsleeve.jpg'],
+                 ARRAY['silkscreen'], ARRAY[]::text[], NULL),
+                ('t-shirts', 'Sample Hidden Product', 'sample-hidden-product', 'SAMPLE-HID', false, false, NULL,
+                 ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::text[], NULL)
+              ) AS v(category_slug, name, slug, sku, active, featured, material, photos, methods, positions, colours)
+              JOIN categories c ON c.slug = v.category_slug
+              WHERE NOT EXISTS (SELECT 1 FROM products p WHERE p.slug = v.slug);
+
+              -- Garments: three colours and four sizes. The cap: two colours, one size.
+              UPDATE products SET
+                  colors = (SELECT jsonb_agg(jsonb_build_object('id', gen_random_uuid(), 'name', c.name, 'hex', c.hex) ORDER BY c.n)
+                            FROM (VALUES (1, 'White', '#FFFFFF'), (2, 'Black', '#000000'), (3, 'Navy Blue', '#1A237E'))
+                                 AS c(n, name, hex)),
+                  sizes = (SELECT jsonb_agg(jsonb_build_object('id', gen_random_uuid(), 'label', s.label) ORDER BY s.n)
+                           FROM (VALUES (1, 'S'), (2, 'M'), (3, 'L'), (4, 'XL')) AS s(n, label))
+              WHERE slug IN ('sample-t-shirt', 'sample-polo-shirt', 'sample-hoodie', 'sample-long-sleeve-t-shirt')
+                AND colors = '[]';
+
+              UPDATE products SET
+                  colors = (SELECT jsonb_agg(jsonb_build_object('id', gen_random_uuid(), 'name', c.name, 'hex', c.hex) ORDER BY c.n)
+                            FROM (VALUES (1, 'Black', '#000000'), (2, 'Red', '#E53935')) AS c(n, name, hex)),
+                  sizes = jsonb_build_array(jsonb_build_object('id', gen_random_uuid(), 'label', 'Custom'))
+              WHERE slug = 'sample-cap' AND colors = '[]';
+
+              UPDATE products SET photos = (
+                  SELECT jsonb_agg(jsonb_build_object(
+                             'id', gen_random_uuid(),
+                             'url', 'http://localhost:9000/product-media/products/caps-hats/' || f.file,
+                             'alt', '') ORDER BY f.n)
+                  FROM unnest(ARRAY[
+                      'H0f28cfa4182a4de88f10c4035a97ddb7O.jpg', 'H15b55eca342847fc8e1c15877fe3ec299.png',
+                      'H27a92802e89b4f25a781b880d66c4e0aK.jpg', 'H2f3e82f990f240ad98a1e54570e0a9c1v.jpg',
+                      'H330e5215dee242d3bbbbc0807b54e5e4r.jpg', 'H3d35f865ef8c424c8425236456ae8944v.jpg',
+                      'H44f848fda8144069a2bf14e3194177e8D.jpg', 'H485162c70eb14718be7f64c875556deaZ.jpg',
+                      'H4ad45dee4f3d4da1b17a612ca047be19i.jpg', 'H53ca6bfba6e148e7a57bebdac42607dfR.jpg',
+                      'H599ac73d04a94dab87e7567d262bd9cbi.jpg', 'H5bd8cf9a6fd642258cd7bf261974de08I.jpg',
+                      'H6d66cbbe50384c498ce8cb1a878449e1x.jpg', 'H6f8df4ac3de44425912d35b8a4b43e21F.jpg',
+                      'H733d5d3970d64020b523aecf0d73c8cbT.jpg', 'H736e41bc31f74176b2b69003a4540389j.jpg',
+                      'H754775bc8e384f768a998f382b779d97T.png', 'H779b8c9f6f0c4e7a9a0447ca0a15902fJ.png',
+                      'H7bb424418f344827b6ada30e95d500f3A.jpg', 'H88844956ee1e4cf691f032c3a77493e1i.jpg',
+                      'H8b9349bb628248828746aa79f78a88a8t.jpg', 'H8ba67d2b9a014f26b0f220c0943b27e8h.jpg',
+                      'H8dbfbfb1b4f2467d8f557bae2d61d47da.png', 'H98b82870bef64351954ae4b568f36971X.jpg',
+                      'H993422035f9e4dc7a4cb5cc43da6de1cV.jpg', 'H9eb15713ac9c43e284153da9d207bfa14.jpg',
+                      'Ha2bd25cb62134e8d93753643e5c548c7W.jpg', 'Ha36bc158ff014988a5a979b00d3a7cccQ.jpg',
+                      'Ha4cc907bf49f47c3a262fd04dd549fa8Z.jpg', 'Ha57653035fa04a628110f808b2150676c.jpg',
+                      'Ha9ea8a668ba6435a8275d848d648da6ax.jpg', 'Hacd14f41a8ca46628781dcd23b807920b.jpg',
+                      'Hafda445083284e7787016641cd62da237.jpg', 'Hb0579a39b5e146cc80a7c92ef9fdf691k.jpg',
+                      'Hc10adefb3e70444b89d0b9afdf828025B.jpg', 'Hc76e294755864250bff59bece9c46ab5X.jpg',
+                      'Hc9383a6732bf4552922d42a334dee52er.jpg', 'Hcae2f9e06f3b47bfbda2ce5e23fdd4a6A.jpg',
+                      'Hcf9cadc6ddf346b9ac093c7b9812ae77x.jpg', 'Hd35c700426d149ce923416788e75dee5E.jpg',
+                      'Hd586ec854cff4a498e153b27add449b7I.jpg', 'Hd60d45adc5554e20b1761d001243385ax.jpg',
+                      'He161dd1c200b4554abced55708de84ffo.jpg', 'He703f69e2ea54c168e7d6b4d64e42759K.jpg',
+                      'He755a7fcaeba4b768980648f0dcc25dcC.jpg', 'He8fd668a4aeb4f5e86f3d8c300520261k.jpg',
+                      'Heb054c50d05c4c8082e7bafe0239ae90K.jpg', 'Hf093a0c5edd8474aaa47d0ae64ab3db75.jpg',
+                      'Hf402f32ac02144fc8051a13a6045397ey.jpg'
+                  ]) WITH ORDINALITY AS f(file, n))
+              WHERE slug = 'sample-cap' AND photos = '[]';
+      rollback:
+        - sql:
+            sql: |
+              DELETE FROM products WHERE slug LIKE 'sample-%';
+              DELETE FROM categories WHERE slug = 'sample-long-sleeve';
+
+  # Site settings: copied from the web app's fixture (src/app/core/fixtures/
+  # public-fixtures.ts), whose values follow BRASETH's own preview page. Staff
+  # enter the real settings from the settings screen in every other
+  # environment. The fixture's placeholder client logos and reviews are NOT
+  # copied: they are marked BUSINESS_OWNER_CONFIRMATION_REQUIRED.
+  - changeSet:
+      id: V003-03-local-site-settings
+      author: braseth
+      context: local
+      changes:
+        - sql:
+            sql: |
+              UPDATE site_settings SET
+                company_name = 'BRASETH T-Shirt Printing Co., Ltd.',
+                legal_name = 'BRASETH T-Shirt Printing House Co., Ltd.',
+                phones = '["+855 98 858 859", "+855 98 857 859", "+855 99 858 859", "+855 85 777 585"]',
+                email = 'sale@braseth-supply.com',
+                telegram = '+85598858859',
+                address = '{"line1": "No. 319, Prek Toal Village", "line2": "Sangkat Steung Meanchey, Khan Meanchey", "city": "Phnom Penh", "country": "Cambodia"}',
+                map_embed_url = 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3907.3337030498183!2d104.78809297481901!3d11.67074588853765!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x31094de170a4b899%3A0x4dc07df31e1bd2f2!2sBRASETH%20T-Shirt%20%7C%20Screen%20Printing%20%26%20Promotional%20Items!5e0!3m2!1sen!2skh!4v1789734519665!5m2!1sen!2skh',
+                business_hours = (
+                  SELECT jsonb_agg(jsonb_build_object('day', d, 'opensAt', '08:00', 'closesAt', '18:00',
+                                                      'breakStartsAt', '12:00', 'breakEndsAt', '13:00', 'closed', false)
+                                   ORDER BY d)
+                  FROM generate_series(1, 6) AS d
+                ) || '[{"day": 0, "opensAt": null, "closesAt": null, "closed": true}]'::jsonb,
+                trust_stats = '[
+                  {"id": "since", "label": "Printing since", "value": "2012", "caption": "Our own workshop in Phnom Penh"},
+                  {"id": "items", "label": "Items in store", "value": "100+", "caption": "Apparel, bags, pens, drinkware"},
+                  {"id": "moq", "label": "Apparel minimum", "value": "100 pcs", "caption": "Or negotiate"},
+                  {"id": "design", "label": "Artwork design", "value": "Free", "caption": "We make your logo print-ready"}
+                ]',
+                reviews_url = 'https://www.google.com/maps/search/?api=1&query=BRASETH%20T-Shirt%20Screen%20Printing%20%26%20Promotional%20Items',
+                site_text = jsonb_build_object('en', jsonb_build_object(
+                  'tagline', 'Custom apparel printing, promotional products and silkscreen materials, made in Phnom Penh.',
+                  'about', jsonb_build_object(
+                    'intro', 'BRASETH T-Shirt Printing House Co., Ltd. was established in late 2012. Our office and workshop are near Steung Meanchey bridge in Phnom Penh, where our team silk-screens, embroiders and heat-presses every order.',
+                    'story', 'Our goal is to be Cambodia’s first choice for silkscreen printing and premium gifts: good quality, attention to detail and fair prices.',
+                    'mission', 'Build lasting relationships with clients, deliver every job at the highest level of craftsmanship, and keep improving our products and service.',
+                    'vision', 'To become the number one silkscreen and premium gifts supplier in Cambodia.',
+                    'capability', 'Custom t-shirts, polos, caps and 100+ promotional items, silk-screened and embroidered in our own workshop. We also sell the materials we print with, retail and wholesale — over 100 items for print shops.',
+                    'quality', 'Send your logo and we prepare the artwork for free. You approve the visual before anything is printed, and a free sample is made once you confirm your quote.')))
+              WHERE id = 1;
+      rollback:
+        - sql:
+            sql: UPDATE site_settings SET company_name = 'BRASETH' WHERE id = 1;
+
+  # Services and portfolio: placeholders, named "Sample", prose CONFIGURE_ME.
+  # One of each is a draft, and one project names a client without
+  # permission, so the public API can be seen to hide both.
+  - changeSet:
+      id: V003-04-local-sample-services
+      author: braseth
+      context: local
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO services (slug, status, method, photos, applicable_category_slugs, service_text, process, position)
+              SELECT v.slug, v.status, v.method, v.photos::jsonb, v.categories::jsonb,
+                     jsonb_build_object('en', jsonb_build_object(
+                       'name', v.name, 'shortDescription', 'CONFIGURE_ME', 'description', 'CONFIGURE_ME',
+                       'benefits', jsonb_build_array('CONFIGURE_ME'), 'useCases', jsonb_build_array('CONFIGURE_ME'),
+                       'turnaround', null)),
+                     '[{"en": {"title": "CONFIGURE_ME", "description": "CONFIGURE_ME"}},
+                       {"en": {"title": "CONFIGURE_ME", "description": "CONFIGURE_ME"}}]'::jsonb,
+                     v.position
+              FROM (VALUES
+                ('sample-silkscreen', 'published', 'silkscreen', 'Sample Silkscreen Printing',
+                 '[{"id": "svc-photo-1", "url": "/assets/catalogue/tshirt-colors.jpg", "alt": "Sample Silkscreen Printing"}]',
+                 '["t-shirts", "polo-shirts"]', 1),
+                ('sample-embroidery', 'published', 'embroidery', 'Sample Embroidery',
+                 '[{"id": "svc-photo-2", "url": "/assets/catalogue/polo-ps001.jpg", "alt": "Sample Embroidery"},
+                   {"id": "svc-photo-3", "url": "/assets/catalogue/cap-ca001.jpg", "alt": "Sample Embroidery on a cap"}]',
+                 '["polo-shirts", "caps-hats"]', 2),
+                ('sample-draft-service', 'draft', null, 'Sample Draft Service', '[]', '[]', 3)
+              ) AS v(slug, status, method, name, photos, categories, position)
+              WHERE NOT EXISTS (SELECT 1 FROM services s WHERE s.slug = v.slug AND s.deleted_at IS NULL);
+      rollback:
+        - sql:
+            sql: DELETE FROM services WHERE slug LIKE 'sample-%';
+
+  - changeSet:
+      id: V003-05-local-sample-portfolio
+      author: braseth
+      context: local
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO portfolio_projects (slug, status, category, completed_on, photos, project_text,
+                                              client_name, client_name_permitted)
+              SELECT v.slug, v.status, v.category, v.completed_on::date, v.photos::jsonb,
+                     jsonb_build_object('en', jsonb_build_object('title', v.title, 'summary', 'CONFIGURE_ME',
+                                                                 'productType', 'CONFIGURE_ME', 'printMethod', 'CONFIGURE_ME')),
+                     v.client_name, v.permitted
+              FROM (VALUES
+                ('sample-named-project', 'published', 'corporate', '2026-03-01', 'Sample Project With Named Client',
+                 '[{"id": "pf-1", "url": "/assets/catalogue/polo.jpg", "alt": "Sample project"}]',
+                 'Sample Client (permitted)', true),
+                ('sample-unnamed-project', 'published', 't-shirts', '2026-05-01', 'Sample Project Without Permission',
+                 '[{"id": "pf-2", "url": "/assets/catalogue/tshirt.jpg", "alt": "Sample project"}]',
+                 'Sample Client (not permitted)', false),
+                ('sample-undated-project', 'published', 'events', null, 'Sample Undated Project', '[]', null, false),
+                ('sample-draft-project', 'draft', 'bags', '2026-06-01', 'Sample Draft Project', '[]', null, false)
+              ) AS v(slug, status, category, completed_on, title, photos, client_name, permitted)
+              WHERE NOT EXISTS (SELECT 1 FROM portfolio_projects p WHERE p.slug = v.slug AND p.deleted_at IS NULL);
+      rollback:
+        - sql:
+            sql: DELETE FROM portfolio_projects WHERE slug LIKE 'sample-%';

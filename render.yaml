@@ -1,0 +1,68 @@
+# Render Blueprint: the Braseth API on Render's Starter plan (always on).
+# Database: Neon (free Postgres). Files: Cloudflare R2 (free, S3-compatible).
+# Values marked `sync: false` are asked for when you create the Blueprint.
+services:
+  - type: web
+    name: braseth-api
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: "8080"
+      # Starter instances have 512 MB; keep the JVM well inside it.
+      - key: JAVA_OPTS
+        value: "-XX:MaxRAMPercentage=70 -XX:+UseSerialGC -Xss512k"
+      - key: TZ
+        value: Asia/Phnom_Penh
+
+      # ---- Neon PostgreSQL (from the Neon connection string) ----
+      # Use Neon's direct host (NOT the "-pooler" one): Liquibase and R2DBC
+      # prepared statements don't work through its transaction pooler.
+      - key: DB_HOST            # e.g. ep-xxx.ap-southeast-1.aws.neon.tech
+        sync: false
+      - key: DB_PORT
+        value: "5432"
+      - key: DB_NAME            # usually neondb
+        sync: false
+      - key: DB_USERNAME
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_SSL_MODE
+        value: require
+
+      - key: JWT_SECRET
+        generateValue: true
+
+      # ---- Cloudflare R2 ----
+      - key: MINIO_ENDPOINT     # https://<account-id>.r2.cloudflarestorage.com
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        sync: false
+      - key: MINIO_SECRET_KEY
+        sync: false
+      - key: MINIO_REGION
+        value: auto
+      - key: MEDIA_PUBLIC_BUCKET_URL   # the product-media bucket's https://pub-xxx.r2.dev URL
+        sync: false
+
+      # ---- Web app ----
+      - key: FRONTEND_URL       # https://braseth-web.onrender.com
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+      # ---- Optional ----
+      - key: MAIL_USERNAME
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: RECAPTCHA_SECRET
+        sync: false

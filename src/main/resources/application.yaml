@@ -1,0 +1,111 @@
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: braseth-ecommerce
+
+  # Reactive PostgreSQL connection used by the application
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5445}/${DB_NAME:braseth_ecommerce}
+    username: ${DB_USERNAME:braseth_ecommerce}
+    password: ${DB_PASSWORD:braseth_ecommerce}
+    pool:
+      enabled: true
+      initial-size: 5
+      max-size: 20
+      max-idle-time: 30m
+      validation-query: SELECT 1
+
+  # JDBC connection used only by Liquibase
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5445}/${DB_NAME:braseth_ecommerce}
+    username: ${DB_USERNAME:braseth_ecommerce}
+    password: ${DB_PASSWORD:braseth_ecommerce}
+    driver-class-name: org.postgresql.Driver
+
+  liquibase:
+    enabled: false
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    drop-first: false
+
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+jwt:
+  # Required: a long random secret (e.g. `openssl rand -hex 32`). Never commit it.
+  secret: ${JWT_SECRET}
+  access-token-expiration: 900000        # 15 minutes
+  refresh-token-expiration: 604800000    # 7 days
+  issuer: braseth-auth-service
+
+app:
+  frontend-url: http://localhost:3000
+  verification-token-expiration: 86400000
+  reset-token-expiration: 3600000
+
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+  bucket-name: product-media
+  # Empty for MinIO; "auto" for Cloudflare R2.
+  region: ${MINIO_REGION:}
+
+braseth:
+  v1:
+    media:
+      # Staff photo uploads go to the public product-media bucket and are
+      # linked from this address. Production sets MINIO_ENDPOINT to the public
+      # MinIO URL (docker-compose.prod.yml), so the same value serves both.
+      bucket: ${minio.bucket-name}
+      public-url: ${minio.endpoint}
+      # Optional: a URL that serves the bucket at its root (a Cloudflare R2
+      # public bucket URL). Empty = links are public-url/bucket/key.
+      public-bucket-url: ${MEDIA_PUBLIC_BUCKET_URL:}
+    telegram:
+      # New quote requests are posted to this staff chat. Empty = no messages.
+      bot-token: ${TELEGRAM_BOT_TOKEN:}
+      chat-id: ${TELEGRAM_CHAT_ID:}
+    recaptcha:
+      # Secret key for Google reCAPTCHA v2 on customer sign-in and sign-up.
+      # Pairs with recaptchaSiteKey in the web app. Empty = check off.
+      secret: ${RECAPTCHA_SECRET:}
+
+logging:
+  level:
+    root: INFO
+    com.braseth.ecommerce: DEBUG
+    org.springframework.security: INFO
+    org.springframework.r2dbc: INFO
+    liquibase: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+  endpoint:
+    health:
+      show-details: when_authorized
+

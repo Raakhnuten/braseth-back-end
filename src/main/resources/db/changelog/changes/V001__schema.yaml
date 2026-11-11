@@ -1,0 +1,530 @@
+databaseChangeLog:
+  # The whole schema: 15 tables. Small lists that only ever belong to one
+  # parent (a product's photos, colours and sizes; a quote's lines; an order's
+  # priced lines) are JSONB or array columns on that parent, not tables.
+  #
+  #   Accounts   roles, users, auth_tokens
+  #   Catalogue  categories, products
+  #   Content    services, portfolio_projects, site_settings
+  #   Work       design_files, quote_requests, orders, order_payments
+  #   Inbox      contact_messages (also the newsletter list)
+  #   Records    notifications, activity_log
+  - changeSet:
+      id: V001-01-extensions-and-functions
+      author: braseth
+      changes:
+        - sql:
+            sql: CREATE EXTENSION IF NOT EXISTS pgcrypto;
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE OR REPLACE FUNCTION fn_set_updated_at()
+              RETURNS TRIGGER
+              LANGUAGE plpgsql
+              AS $$
+              BEGIN
+                  NEW.updated_at = NOW();
+                  RETURN NEW;
+              END;
+              $$;
+      rollback:
+        - sql:
+            sql: DROP FUNCTION IF EXISTS fn_set_updated_at();
+
+  - changeSet:
+      id: V001-02-accounts
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE roles (
+                  id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  code         VARCHAR(40)  NOT NULL UNIQUE,
+                  name         VARCHAR(80)  NOT NULL UNIQUE,
+                  description  TEXT,
+                  -- Permission codes the role grants, e.g. 'quotes.view'.
+                  permissions  TEXT[]       NOT NULL DEFAULT '{}',
+                  is_active    BOOLEAN      NOT NULL DEFAULT true,
+                  created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  updated_at   TIMESTAMPTZ
+              );
+
+              -- Staff and customers alike. The customer's contact details,
+              -- company and notification choices live on the same row.
+              CREATE TABLE users (
+                  id                        UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  name                      VARCHAR(150)  NOT NULL,
+                  email                     VARCHAR(255)  NOT NULL UNIQUE,
+                  phone                     VARCHAR(50)   UNIQUE,
+                  password_hash             VARCHAR(255)  NOT NULL,
+                  status                    VARCHAR(30)   NOT NULL DEFAULT 'active'
+                                            CHECK (status IN ('active', 'invited', 'suspended', 'disabled', 'inactive', 'deleted')),
+                  -- roles.code values. The system has two roles: an admin or a customer.
+                  roles                     TEXT[]        NOT NULL DEFAULT '{}'
+                                            CHECK (roles <@ ARRAY['ROLE_ADMIN', 'ROLE_CUSTOMER']::text[]),
+                  email_verified_at         TIMESTAMPTZ,
+                  last_login_at             TIMESTAMPTZ,
+                  company_name              VARCHAR(200),
+                  telegram                  VARCHAR(80),
+                  preferred_contact_method  VARCHAR(20)   NOT NULL DEFAULT 'email',
+                  -- A second address line, when given, is kept on its own line.
+                  address                   VARCHAR(255),
+                  city                      VARCHAR(100),
+                  province                  VARCHAR(100),
+                  postal_code               VARCHAR(20),
+                  country                   VARCHAR(100),
+                  -- {address?, contactPersonName?, contactPersonRole?, contactEmail?,
+                  --  contactPhone?, taxId?, industry?, website?}; null for an individual.
+                  company                   JSONB,
+                  notify_quote_updates      BOOLEAN       NOT NULL DEFAULT true,
+                  notify_order_updates      BOOLEAN       NOT NULL DEFAULT true,
+                  notify_design_updates     BOOLEAN       NOT NULL DEFAULT true,
+                  -- Opt-in only.
+                  marketing_opt_in          BOOLEAN       NOT NULL DEFAULT false,
+                  -- Staff wording, never shown to the customer.
+                  suspended_reason          VARCHAR(500),
+                  created_at                TIMESTAMPTZ   NOT NULL DEFAULT now(),
+                  updated_at                TIMESTAMPTZ,
+                  deleted_at                TIMESTAMPTZ
+              );
+              CREATE INDEX idx_users_lower_email ON users (lower(email));
+              CREATE INDEX idx_users_roles ON users USING gin (roles);
+
+              -- Sessions and e-mail links. Only a hash of each token is stored.
+              CREATE TABLE auth_tokens (
+                  id          UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  user_id     UUID          NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                  purpose     VARCHAR(30)   NOT NULL
+                              CHECK (purpose IN ('refresh', 'email-verification', 'password-reset')),
+                  token_hash  VARCHAR(255)  NOT NULL UNIQUE,
+                  expires_at  TIMESTAMPTZ   NOT NULL,
+                  -- Link used, or session revoked.
+                  used_at     TIMESTAMPTZ,
+                  created_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+              );
+              CREATE INDEX idx_auth_tokens_user ON auth_tokens (user_id, purpose);
+              CREATE INDEX idx_auth_tokens_expires_at ON auth_tokens (expires_at);
+      rollback:
+        - sql:
+            sql: |
+              DROP TABLE auth_tokens;
+              DROP TABLE users;
+              DROP TABLE roles;
+
+  - changeSet:
+      id: V001-03-catalogue
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE categories (
+                  id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  parent_id    UUID          REFERENCES categories (id) ON DELETE SET NULL,
+                  name         VARCHAR(150)  NOT NULL,
+                  -- Unique across removed rows too; removing one renames its slug.
+                  slug         VARCHAR(180)  NOT NULL UNIQUE,
+                  description  TEXT,
+                  image_url    VARCHAR(500),
+                  -- {"en": {name, description}, "km": {...}}; English is also kept in name / description.
+                  web_text     JSONB,
+                  sort_order   INTEGER       NOT NULL DEFAULT 0,
+                  is_active    BOOLEAN       NOT NULL DEFAULT true,
+                  created_by   UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  updated_by   UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
+                  updated_at   TIMESTAMPTZ,
+                  deleted_at   TIMESTAMPTZ
+              );
+              CREATE INDEX idx_categories_parent ON categories (parent_id);
+
+              -- Never priced here: BRASETH prices every job on its quote.
+              CREATE TABLE products (
+                  id                      UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  category_id             UUID          REFERENCES categories (id) ON DELETE SET NULL,
+                  name                    VARCHAR(200)  NOT NULL,
+                  slug                    VARCHAR(220)  NOT NULL UNIQUE,
+                  sku                     VARCHAR(80)   UNIQUE,
+                  short_description       TEXT,
+                  description             TEXT,
+                  -- {"en": {name, shortDescription, description, material, careInstructions,
+                  --         productionLeadTime}, "km": {...}}; English is also kept in the columns above.
+                  web_text                JSONB,
+                  -- [{id, url, alt, width?, height?}]; the first is the main photo.
+                  photos                  JSONB         NOT NULL DEFAULT '[]',
+                  -- [{id, name, hex}]
+                  colors                  JSONB         NOT NULL DEFAULT '[]',
+                  -- [{id, label, measurements?}]
+                  sizes                   JSONB         NOT NULL DEFAULT '[]',
+                  -- The web app's names: silkscreen, embroidery, heat-transfer, sublimation, dtf, pad-printing.
+                  print_methods           TEXT[]        NOT NULL DEFAULT '{}',
+                  -- front, back, left-sleeve, right-sleeve, pocket, other.
+                  print_positions         TEXT[]        NOT NULL DEFAULT '{}',
+                  weight_gsm              INTEGER       CHECK (weight_gsm > 0),
+                  minimum_order_quantity  INTEGER       CHECK (minimum_order_quantity > 0),
+                  maximum_print_colors    INTEGER       CHECK (maximum_print_colors > 0),
+                  is_customizable         BOOLEAN       NOT NULL DEFAULT true,
+                  -- false is a draft: hidden from the public site.
+                  is_active               BOOLEAN       NOT NULL DEFAULT true,
+                  featured                BOOLEAN       NOT NULL DEFAULT false,
+                  best_seller             BOOLEAN       NOT NULL DEFAULT false,
+                  created_by              UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  updated_by              UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  created_at              TIMESTAMPTZ   NOT NULL DEFAULT now(),
+                  updated_at              TIMESTAMPTZ,
+                  deleted_at              TIMESTAMPTZ
+              );
+              CREATE INDEX idx_products_category ON products (category_id);
+              CREATE INDEX idx_products_print_methods ON products USING gin (print_methods);
+      rollback:
+        - sql:
+            sql: |
+              DROP TABLE products;
+              DROP TABLE categories;
+
+  - changeSet:
+      id: V001-04-content
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              -- One row, holding the whole settings document.
+              CREATE TABLE site_settings (
+                  id              SMALLINT     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                  company_name    VARCHAR(200) NOT NULL,
+                  legal_name      VARCHAR(200),
+                  -- In display order; the first is the one the header shows.
+                  phones          JSONB        NOT NULL DEFAULT '[]',
+                  email           VARCHAR(255),
+                  telegram        VARCHAR(100),
+                  -- {line1, line2?, city, province?, postalCode?, country}
+                  address         JSONB,
+                  map_embed_url   TEXT,
+                  -- [{day, opensAt, closesAt, closed, breakStartsAt?, breakEndsAt?}]
+                  business_hours  JSONB        NOT NULL DEFAULT '[]',
+                  -- [{platform, label, url}]
+                  social          JSONB        NOT NULL DEFAULT '[]',
+                  -- {"en": {tagline, about: {intro, story, ...}}, "km": {...}}
+                  site_text       JSONB        NOT NULL DEFAULT '{}',
+                  -- Homepage trust band, logo wall and reviews. Each stays an
+                  -- empty list until the owner supplies real, permitted entries.
+                  trust_stats     JSONB        NOT NULL DEFAULT '[]',
+                  client_logos    JSONB        NOT NULL DEFAULT '[]',
+                  reviews         JSONB        NOT NULL DEFAULT '[]',
+                  reviews_url     TEXT,
+                  updated_at      TIMESTAMPTZ,
+                  updated_by      UUID REFERENCES users (id) ON DELETE SET NULL
+              );
+
+              CREATE TABLE services (
+                  id                         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  slug                       VARCHAR(180) NOT NULL,
+                  status                     VARCHAR(20)  NOT NULL DEFAULT 'draft'
+                                             CHECK (status IN ('draft', 'published')),
+                  -- The web app's print method name (silkscreen, embroidery, ...), or none.
+                  method                     VARCHAR(40),
+                  -- [{id, url, alt, width?, height?}]; the first is the card image.
+                  photos                     JSONB        NOT NULL DEFAULT '[]',
+                  applicable_category_slugs  JSONB        NOT NULL DEFAULT '[]',
+                  minimum_order_quantity     INTEGER      CHECK (minimum_order_quantity > 0),
+                  -- {"en": {name, shortDescription, description, benefits[], useCases[], turnaround}, "km": {...}}
+                  service_text               JSONB        NOT NULL DEFAULT '{}',
+                  -- [{"en": {title, description}, "km": {...}}], in order
+                  process                    JSONB        NOT NULL DEFAULT '[]',
+                  -- Public order, lowest first.
+                  position                   INTEGER      NOT NULL DEFAULT 0,
+                  created_at                 TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  updated_at                 TIMESTAMPTZ,
+                  updated_by                 UUID REFERENCES users (id) ON DELETE SET NULL,
+                  deleted_at                 TIMESTAMPTZ
+              );
+              CREATE UNIQUE INDEX uk_services_slug ON services (slug) WHERE deleted_at IS NULL;
+              CREATE INDEX idx_services_public ON services (position) WHERE status = 'published' AND deleted_at IS NULL;
+
+              CREATE TABLE portfolio_projects (
+                  id                     UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  slug                   VARCHAR(180) NOT NULL,
+                  status                 VARCHAR(20)  NOT NULL DEFAULT 'draft'
+                                         CHECK (status IN ('draft', 'published')),
+                  category               VARCHAR(40)  NOT NULL
+                                         CHECK (category IN ('t-shirts', 'polo', 'bags', 'embroidery',
+                                                             'corporate', 'events', 'promotional')),
+                  completed_on           DATE,
+                  -- [{id, url, alt, ...}]; the first is the cover.
+                  photos                 JSONB        NOT NULL DEFAULT '[]',
+                  -- {"en": {title, summary, productType, printMethod}, "km": {...}}
+                  project_text           JSONB        NOT NULL DEFAULT '{}',
+                  -- Kept for staff always; published only with the client's written permission.
+                  client_name            VARCHAR(200),
+                  client_name_permitted  BOOLEAN      NOT NULL DEFAULT false,
+                  created_at             TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  updated_at             TIMESTAMPTZ,
+                  updated_by             UUID REFERENCES users (id) ON DELETE SET NULL,
+                  deleted_at             TIMESTAMPTZ
+              );
+              CREATE UNIQUE INDEX uk_portfolio_projects_slug ON portfolio_projects (slug) WHERE deleted_at IS NULL;
+              CREATE INDEX idx_portfolio_public ON portfolio_projects (completed_on DESC NULLS LAST)
+                  WHERE status = 'published' AND deleted_at IS NULL;
+      rollback:
+        - sql:
+            sql: |
+              DROP TABLE portfolio_projects;
+              DROP TABLE services;
+              DROP TABLE site_settings;
+
+  - changeSet:
+      id: V001-05-quotes-and-orders
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              -- Human references such as QR-2026-00001, SO-2026-00001 and CM-2026-00001.
+              CREATE SEQUENCE quote_request_reference_seq;
+              CREATE SEQUENCE order_reference_seq;
+              CREATE SEQUENCE contact_message_reference_seq;
+
+              CREATE TABLE design_files (
+                  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  -- Null for a guest upload, until a signed-in request claims it.
+                  customer_id     UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  original_name   VARCHAR(255) NOT NULL,
+                  mime_type       VARCHAR(100) NOT NULL,
+                  size_bytes      BIGINT       NOT NULL CHECK (size_bytes > 0),
+                  -- Object key in the private artwork bucket; never a public URL.
+                  storage_key     VARCHAR(300) NOT NULL,
+                  status          VARCHAR(20)  NOT NULL DEFAULT 'uploaded'
+                                  CHECK (status IN ('uploaded', 'under-review', 'approved', 'rejected')),
+                  upload_note     TEXT,
+                  -- Shown to the customer; required by staff when rejecting.
+                  review_note     TEXT,
+                  reviewed_at     TIMESTAMPTZ,
+                  reviewed_by     UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  uploaded_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  deleted_at      TIMESTAMPTZ
+              );
+              CREATE INDEX idx_design_files_customer ON design_files (customer_id, uploaded_at DESC)
+                  WHERE deleted_at IS NULL;
+              CREATE INDEX idx_design_files_queue ON design_files (status, uploaded_at)
+                  WHERE deleted_at IS NULL;
+
+              CREATE TABLE quote_requests (
+                  id                        UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  reference                 VARCHAR(20)  NOT NULL UNIQUE,
+                  -- Null for a guest; set when the request was sent while signed in.
+                  customer_id               UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  purpose                   VARCHAR(20)  NOT NULL DEFAULT 'quote'
+                                            CHECK (purpose IN ('quote', 'free-visual')),
+                  status                    VARCHAR(30)  NOT NULL DEFAULT 'pending-review'
+                                            CHECK (status IN ('pending-review', 'quoted', 'awaiting-approval',
+                                                              'approved', 'rejected', 'expired', 'cancelled')),
+                  full_name                 VARCHAR(120) NOT NULL,
+                  company_name              VARCHAR(200),
+                  email                     VARCHAR(255),
+                  phone                     VARCHAR(40)  NOT NULL,
+                  telegram                  VARCHAR(80),
+                  preferred_contact_method  VARCHAR(20)  NOT NULL
+                                            CHECK (preferred_contact_method IN ('email', 'phone', 'telegram')),
+                  product_note              TEXT,
+                  -- The request exactly as sent, so staff and the customer see what was asked.
+                  request                   JSONB        NOT NULL,
+                  -- [{productId?, productName, quantity, printMethod?}], in order. The name is
+                  -- the one at the time, so a later rename or delete does not change it;
+                  -- quantity 0 means "not stated" (a free-visual request).
+                  lines                     JSONB        NOT NULL DEFAULT '[]',
+                  -- The artwork attached (design_files.id).
+                  design_file_ids           UUID[]       NOT NULL DEFAULT '{}',
+                  -- Staff pricing (the web app's QuotePricing) — null until priced.
+                  pricing                   JSONB,
+                  staff_note                TEXT,
+                  pricing_sent_at           TIMESTAMPTZ,
+                  has_unsent_pricing        BOOLEAN      NOT NULL DEFAULT false,
+                  expires_at                TIMESTAMPTZ,
+                  decision_note             TEXT,
+                  decided_at                TIMESTAMPTZ,
+                  converted_order_id        UUID,
+                  created_at                TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  updated_at                TIMESTAMPTZ,
+                  updated_by                UUID         REFERENCES users (id) ON DELETE SET NULL
+              );
+              CREATE INDEX idx_quote_requests_customer ON quote_requests (customer_id, created_at DESC);
+              CREATE INDEX idx_quote_requests_status ON quote_requests (status, created_at DESC);
+              CREATE INDEX idx_quote_requests_designs ON quote_requests USING gin (design_file_ids);
+
+              CREATE TABLE orders (
+                  id                        UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  reference                 VARCHAR(20)   NOT NULL UNIQUE,
+                  quote_request_id          UUID          NOT NULL UNIQUE REFERENCES quote_requests (id) ON DELETE RESTRICT,
+                  -- Null for a guest.
+                  customer_id               UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  -- Contact as on the quote, so staff can reach a guest.
+                  full_name                 VARCHAR(120)  NOT NULL,
+                  company_name              VARCHAR(200),
+                  email                     VARCHAR(255),
+                  phone                     VARCHAR(40)   NOT NULL,
+                  telegram                  VARCHAR(80),
+                  preferred_contact_method  VARCHAR(20)   NOT NULL,
+                  status                    VARCHAR(30)   NOT NULL DEFAULT 'approved'
+                                            CHECK (status IN ('approved', 'payment-pending', 'in-production',
+                                                              'quality-control', 'ready', 'shipping', 'delivered',
+                                                              'completed', 'cancelled')),
+                  currency                  VARCHAR(3)    NOT NULL,
+                  -- The priced lines, copied from the quote when it was accepted:
+                  -- [{id, description, quantity, unitPrice, lineTotal}], in order.
+                  lines                     JSONB         NOT NULL DEFAULT '[]',
+                  subtotal                  NUMERIC(12,2),
+                  delivery_cost             NUMERIC(12,2),
+                  discount                  NUMERIC(12,2),
+                  tax                       NUMERIC(12,2),
+                  total                     NUMERIC(12,2),
+                  -- When BRASETH promised the job; null until staff set it.
+                  due_date                  DATE,
+                  delivery_method           VARCHAR(20)   CHECK (delivery_method IN ('pickup', 'delivery')),
+                  delivery_address          TEXT,
+                  delivery_contact_name     VARCHAR(120),
+                  delivery_contact_phone    VARCHAR(40),
+                  delivery_estimated_date   DATE,
+                  delivery_tracking         VARCHAR(120),
+                  delivery_instructions     TEXT,
+                  customer_note             TEXT,
+                  created_at                TIMESTAMPTZ   NOT NULL DEFAULT now(),
+                  updated_at                TIMESTAMPTZ,
+                  updated_by                UUID          REFERENCES users (id) ON DELETE SET NULL
+              );
+              CREATE INDEX idx_orders_customer ON orders (customer_id, created_at DESC);
+              CREATE INDEX idx_orders_status ON orders (status, due_date);
+
+              ALTER TABLE quote_requests
+                  ADD CONSTRAINT fk_quote_requests_order
+                  FOREIGN KEY (converted_order_id) REFERENCES orders (id) ON DELETE SET NULL;
+
+              -- Payments as staff receive them. `method` is free text ("Cash", "ABA transfer").
+              CREATE TABLE order_payments (
+                  id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  order_id     UUID          NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+                  amount       NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+                  method       VARCHAR(80)   NOT NULL,
+                  received_on  DATE          NOT NULL,
+                  reference    VARCHAR(120),
+                  recorded_by  UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  recorded_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+              );
+              CREATE INDEX idx_order_payments_order ON order_payments (order_id);
+      rollback:
+        - sql:
+            sql: |
+              DROP TABLE order_payments;
+              ALTER TABLE quote_requests DROP CONSTRAINT fk_quote_requests_order;
+              DROP TABLE orders;
+              DROP TABLE quote_requests;
+              DROP TABLE design_files;
+              DROP SEQUENCE contact_message_reference_seq;
+              DROP SEQUENCE order_reference_seq;
+              DROP SEQUENCE quote_request_reference_seq;
+
+  - changeSet:
+      id: V001-06-inbox-and-records
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              -- The contact-form inbox and the newsletter list. A message has a
+              -- reference, name, subject and text; a newsletter sign-up only an
+              -- e-mail and its subscribed / unsubscribed status.
+              CREATE TABLE contact_messages (
+                  id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+                  kind             VARCHAR(20)  NOT NULL DEFAULT 'message'
+                                   CHECK (kind IN ('message', 'newsletter')),
+                  reference        VARCHAR(20)  UNIQUE,
+                  name             VARCHAR(120),
+                  email            VARCHAR(255) NOT NULL,
+                  phone            VARCHAR(40),
+                  subject          VARCHAR(200),
+                  message          TEXT,
+                  -- Set when the sender's email matches a customer account.
+                  customer_id      UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  status           VARCHAR(20)  NOT NULL DEFAULT 'new',
+                  -- When the message arrived, or when the address (last) subscribed.
+                  received_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                  replied_at       TIMESTAMPTZ,
+                  replied_by       UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  unsubscribed_at  TIMESTAMPTZ,
+                  updated_at       TIMESTAMPTZ,
+                  updated_by       UUID         REFERENCES users (id) ON DELETE SET NULL,
+                  CHECK (kind = 'newsletter'
+                         OR (reference IS NOT NULL AND name IS NOT NULL AND subject IS NOT NULL AND message IS NOT NULL
+                             AND status IN ('new', 'read', 'replied', 'archived'))),
+                  CHECK (kind = 'message' OR status IN ('subscribed', 'unsubscribed'))
+              );
+              CREATE INDEX idx_contact_messages_inbox ON contact_messages (status, received_at DESC)
+                  WHERE kind = 'message';
+              CREATE UNIQUE INDEX uk_contact_messages_newsletter_email ON contact_messages (lower(email))
+                  WHERE kind = 'newsletter';
+
+              -- In-app notifications: a customer's (audience 'customer') and the
+              -- staff alert bell ('staff'). One row per person, with their own read state.
+              CREATE TABLE notifications (
+                  id          UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  user_id     UUID          NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                  audience    VARCHAR(20)   NOT NULL CHECK (audience IN ('customer', 'staff')),
+                  -- The web app's topic, e.g. 'order-status' or 'quote-requested'.
+                  topic       VARCHAR(40)   NOT NULL,
+                  title       VARCHAR(255)  NOT NULL,
+                  body        TEXT          NOT NULL,
+                  -- Where it opens in the web app, when it points at something.
+                  link        VARCHAR(300),
+                  read_at     TIMESTAMPTZ,
+                  created_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+              );
+              CREATE INDEX idx_notifications_user ON notifications (user_id, audience, created_at DESC);
+
+              -- What happened, written by the backend as it happens:
+              --   staff          the staff activity log (who changed what; body is the summary)
+              --   order-event    the order timeline the customer sees (status, body is their note)
+              --   order-note     staff-only remarks on an order
+              --   customer-note  staff-only remarks on a customer account
+              CREATE TABLE activity_log (
+                  id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+                  kind           VARCHAR(20)   NOT NULL
+                                 CHECK (kind IN ('staff', 'order-event', 'order-note', 'customer-note')),
+                  -- The order, customer, quote ... it is about.
+                  subject_id     UUID,
+                  -- staff entries: the area (quote, order, product, ...) and the subject's name at the time.
+                  area           VARCHAR(20),
+                  subject_label  VARCHAR(200),
+                  -- order-event entries: the stage the order moved to.
+                  status         VARCHAR(30),
+                  body           TEXT,
+                  actor_id       UUID          REFERENCES users (id) ON DELETE SET NULL,
+                  -- The name at the time, so the log still reads after an account goes.
+                  actor_name     VARCHAR(150),
+                  at             TIMESTAMPTZ   NOT NULL DEFAULT now()
+              );
+              CREATE INDEX idx_activity_log_kind_at ON activity_log (kind, at DESC);
+              CREATE INDEX idx_activity_log_subject ON activity_log (subject_id, kind, at);
+      rollback:
+        - sql:
+            sql: |
+              DROP TABLE activity_log;
+              DROP TABLE notifications;
+              DROP TABLE contact_messages;
+
+  - changeSet:
+      id: V001-07-updated-at-triggers
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              CREATE TRIGGER trg_roles_updated_at BEFORE UPDATE ON roles
+                  FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+              CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users
+                  FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+              CREATE TRIGGER trg_categories_updated_at BEFORE UPDATE ON categories
+                  FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+              CREATE TRIGGER trg_products_updated_at BEFORE UPDATE ON products
+                  FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+      rollback:
+        - sql:
+            sql: |
+              DROP TRIGGER trg_products_updated_at ON products;
+              DROP TRIGGER trg_categories_updated_at ON categories;
+              DROP TRIGGER trg_users_updated_at ON users;
+              DROP TRIGGER trg_roles_updated_at ON roles;

@@ -1,0 +1,40 @@
+# Production profile (the Docker image turns it on). Every secret comes from
+# the environment; see .env.prod.example.
+spring:
+  # DB_SSL_MODE=require for a hosted database (Neon, Supabase, ...). The
+  # docker-compose database on the same server needs no TLS.
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME}?sslMode=${DB_SSL_MODE:disable}
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME}?sslmode=${DB_SSL_MODE:disable}
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    # Must be set: with no context Liquibase would also run the "local"
+    # changesets (dev sign-in accounts and sample data).
+    contexts: prod
+
+app:
+  # The public web app; verification and reset e-mails link here.
+  frontend-url: ${FRONTEND_URL}
+
+braseth:
+  cors:
+    # Comma-separated, e.g. https://braseth.com,https://www.braseth.com
+    allowed-origins: ${CORS_ALLOWED_ORIGINS}
+
+management:
+  health:
+    mail:
+      # A Gmail hiccup should not mark the whole API as down.
+      enabled: false
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+logging:
+  level:
+    com.braseth.ecommerce: INFO

@@ -1,0 +1,81 @@
+databaseChangeLog:
+  # Rows every environment needs: the roles and what each may do, the team's
+  # starting accounts, the product categories and the site settings row.
+  - changeSet:
+      id: V002-01-roles
+      author: braseth
+      comment: "The two roles: Admin (all of the staff area, shown as Owner in the web app) and Customer"
+      changes:
+        - sql:
+            sql: |
+              -- Staff-area permission codes (the web app gates on these):
+              --   quotes.view      See quotes                 quotes.price     Price and send quotes
+              --   orders.view      See orders                 orders.progress  Move orders and schedule
+              --   orders.payments  Record payments            designs.review   Review artwork
+              --   customers.view   See customers              customers.manage Suspend customers
+              --   messages.handle  Handle contact messages    settings.edit    Edit site settings
+              --   catalogue.edit   Edit the catalogue         newsletter.view  See the newsletter list
+              --   staff.manage     Manage staff               activity.view    Read the activity log
+              --   reports.view     Read sales reports
+              INSERT INTO roles (id, code, name, description, permissions) VALUES
+                ('a1000000-0000-0000-0000-000000000001', 'ROLE_ADMIN', 'Administrator',
+                 'Full system access — all modules',
+                 '{quotes.view,quotes.price,orders.view,orders.progress,orders.payments,designs.review,customers.view,customers.manage,messages.handle,settings.edit,catalogue.edit,newsletter.view,staff.manage,activity.view,reports.view}'),
+                ('a1000000-0000-0000-0000-000000000002', 'ROLE_CUSTOMER', 'Customer',
+                 'Standard customer — browse, quote, order, pay', '{}');
+      rollback:
+        - sql:
+            sql: DELETE FROM roles;
+
+  - changeSet:
+      id: V002-02-users
+      author: braseth
+      comment: "The starting accounts — one admin and two customers"
+      changes:
+        - sql:
+            sql: |
+              -- password_hash is bcrypt of 'Admin@1234' — CHANGE IN PRODUCTION
+              INSERT INTO users (id, name, email, phone, password_hash, status, email_verified_at, roles,
+                                 company_name, address, city, province, country) VALUES
+                ('b1000000-0000-0000-0000-000000000001', 'Braseth Admin', 'admin@braseth.com', '+855 12 000 001',
+                 '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TugNGMUrq4.Mz9JV.W3mJHFyHzn.', 'active', NOW(), '{ROLE_ADMIN}',
+                 NULL, NULL, NULL, NULL, NULL),
+                ('b1000000-0000-0000-0000-000000000005', 'Pich Sophea', 'sophea@gmail.com', '+855 12 100 001',
+                 '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TugNGMUrq4.Mz9JV.W3mJHFyHzn.', 'active', NOW(), '{ROLE_CUSTOMER}',
+                 'Sophea Design Studio', 'No. 45 St. 271, Toul Kork', 'Phnom Penh', 'Phnom Penh', 'Cambodia'),
+                ('b1000000-0000-0000-0000-000000000006', 'Meas Ratanak', 'ratanak@gmail.com', '+855 12 100 002',
+                 '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TugNGMUrq4.Mz9JV.W3mJHFyHzn.', 'active', NOW(), '{ROLE_CUSTOMER}',
+                 'Ratanak Events Co.', 'No. 12 National Road 6, Chroy Changvar', 'Phnom Penh', 'Phnom Penh', 'Cambodia');
+      rollback:
+        - sql:
+            sql: DELETE FROM users WHERE id::text LIKE 'b1000000-%';
+
+  - changeSet:
+      id: V002-03-categories
+      author: braseth
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO categories (name, slug, sort_order, created_by) VALUES
+                ('T-Shirts',       't-shirts',       1, 'b1000000-0000-0000-0000-000000000001'),
+                ('Polo Shirts',    'polo-shirts',    2, 'b1000000-0000-0000-0000-000000000001'),
+                ('Hoodies',        'hoodies',        3, 'b1000000-0000-0000-0000-000000000001'),
+                ('Caps & Hats',    'caps-hats',      4, 'b1000000-0000-0000-0000-000000000001'),
+                ('Tote Bags',      'tote-bags',      5, 'b1000000-0000-0000-0000-000000000001'),
+                ('Uniforms',       'uniforms',       6, 'b1000000-0000-0000-0000-000000000001'),
+                ('Sportswear',     'sportswear',     7, 'b1000000-0000-0000-0000-000000000001'),
+                ('Corporate Wear', 'corporate-wear', 8, 'b1000000-0000-0000-0000-000000000001');
+      rollback:
+        - sql:
+            sql: DELETE FROM categories;
+
+  - changeSet:
+      id: V002-04-site-settings
+      author: braseth
+      comment: "The row always exists; staff fill in the rest from the settings screen"
+      changes:
+        - sql:
+            sql: INSERT INTO site_settings (company_name) VALUES ('BRASETH');
+      rollback:
+        - sql:
+            sql: DELETE FROM site_settings;

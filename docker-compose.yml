@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: braseth_ecommerce-postgres
+
+    environment:
+      POSTGRES_DB: braseth_ecommerce
+      POSTGRES_USER: braseth_ecommerce
+      POSTGRES_PASSWORD: braseth_ecommerce
+      TZ: Asia/Phnom_Penh
+
+    ports:
+      - "5445:5432"
+
+    volumes:
+      - braseth_ecommerce_pg_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U braseth_ecommerce -d braseth_ecommerce"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+    restart: unless-stopped
+
+networks:
+  braseth-network:
+    driver: bridge
+
+volumes:
+  braseth_ecommerce_pg_data:

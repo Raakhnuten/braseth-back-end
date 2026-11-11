@@ -1,0 +1,10 @@
+# The only changelog: every profile (local, prod, test) runs it. Changesets
+# marked with the "local" context (dev accounts and sample data) run only
+# where that context is set.
+databaseChangeLog:
+  - include:
+      file: db/changelog/changes/V001__schema.yaml
+  - include:
+      file: db/changelog/changes/V002__seed_data.yaml
+  - include:
+      file: db/changelog/changes/V003__local_sample_data.yaml

@@ -1,0 +1,5 @@
+org.springframework.boot.env.EnvironmentPostProcessor=\
+com.braseth.ecommerce.config.LocalMailEnvironment
+
+org.springframework.boot.diagnostics.FailureAnalyzer=\
+com.braseth.ecommerce.security.jwt.JwtSecretFailureAnalyzer
